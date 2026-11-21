@@ -1,0 +1,88 @@
+# Inkling 2 Mini on RTX 5090 — FP8 W8A16 + DSpark (azjhf-dev fork)
+
+Branch: `inkling2-mini-sm120-fp8`, based on the head of upstream PR
+[vllm-project/vllm#69028](https://github.com/vllm-project/vllm/pull/69028)
+(`[Model] Add Inkling 2 Mini`, commit `fc1443152`).
+
+## Why this fork exists
+
+A r/LocalLLaMA thread (2026-11-21,
+[post](https://www.reddit.com/r/LocalLLaMA/comments/1y1n4k7/inkling_2_mini_on_rtx_4090_200_toks_with_vllm_fp8/))
+reports ~190-220 tok/s for Inkling 2 Mini on an RTX 4090 using:
+
+1. a shared 7-edit sm89 enablement patch (in the thread, packaged by Claude,
+   untested by anyone in the thread);
+2. an **unshared** "bigger patch": FP8 W8A16 attention / lm_head / embeddings
+   via a small Triton kernel, plus DSpark speculative drafting.
+
+This fork re-implements part (2) ourselves for the **RTX 5090 (sm_120)**,
+from primary sources only: PR #69028, the
+[model card](https://thinkingmachines.ai/model-card/inkling-2-mini/), and the
+[checkpoint config](https://huggingface.co/thinkingmachines/Inkling-2-Mini).
+We do not use or copy the Reddit poster's unshared code, and we do **not**
+claim to reproduce their numbers. Their tok/s figures, 0.4% perplexity-loss
+figure, and 24 GB / 35k-context fit are self-reported and unverified.
+
+Note on the 4090 patch: the sm89 edits are irrelevant on a 5090. PR #69028
+already supports SM120/SM121 natively (capability-family 120 gates), so the
+5090 needs no enablement patch; only the FP8 work matters here.
+
+## What is in this branch
+
+| Piece | Status | Notes |
+|---|---|---|
+| Base: PR #69028 (model + DSpark drafter, NVFP4 experts, FP8 KV) | inherited, upstream-tested on GB200 | sm_120 covered by the family-120 gates |
+| `nvidia/ops/fp8_w8a16.py`: FP8 W8A16 Triton GEMV (M<=16) + tiled GEMM, per-row scales, fp32 accumulation | added; CPU-reference tested in sandbox; **Triton kernels compile-tested only, not run on a GPU** | no FP8 tensor cores needed; bf16 math |
+| `nvidia/fp8_dense.py` + `INKLING2_FP8_DENSE` env gating, wired into `load_weights` and `Inkling2LogitsProcessor._apply_head` | added, `lm_head` group implemented | bf16 lm_head weight is kept: the DSpark drafter aliases it and asserts bf16 |
+| FP8 for attention projections (qkvr / wo_ud) | **planned, not implemented** | needs care around `add_linear_lora` reading `.weight` |
+| FP8 input embeddings | **planned, not implemented** | quality risk: per-row FP8 error feeds the residual stream directly; measure first |
+| `tests/models/inkling2/test_fp8_w8a16.py` | added | CPU tests run in CI-style env; CUDA tests skip without a GPU |
+| `benchmarks/inkling2/bench_5090.py` | added, not yet run on hardware | configurable: fp8 on/off, DSpark on/off, context, batch, lens |
+
+## Usage (on a 5090)
+
+```bash
+# stock PR behaviour (bf16 head, DSpark off)
+python benchmarks/inkling2/bench_5090.py --model thinkingmachines/Inkling-2-Mini
+
+# our FP8 W8A16 lm_head + DSpark, 35k context like the Reddit setup
+python benchmarks/inkling2/bench_5090.py \
+    --model thinkingmachines/Inkling-2-Mini \
+    --fp8-dense lm_head --dspark --num-speculative-tokens 7 \
+    --max-model-len 35840 --input-len 512 --output-len 256 --num-prompts 8
+```
+
+`INKLING2_FP8_DENSE` is a comma list; only `lm_head` is implemented.
+Unknown values raise; planned-but-unimplemented groups warn and skip.
+
+## Expected effect (reasoning, not measurement)
+
+Decode is bandwidth-bound. Per generated token the dense reads are dominated
+by the LM head (201024 x 2304 bf16 = ~0.93 GB, TP1). FP8 W8A16 halves that
+read; qkvr/wo_ud/attn_res are tens of MB per token and secondary. The
+experts are already NVFP4 and the KV cache already FP8 in PR #69028. DSpark
+(with its acceptance rate) multiplies whatever the verify step costs.
+Net: expect a meaningful but single-digit-to-tens-of-percent gain from the
+lm_head FP8 path alone, plus the DSpark multiplier. Measure, don't trust.
+
+## Honesty / gaps
+
+- No GPU in the authoring sandbox: the Triton kernels are compile-checked
+  and mirrored by a CPU reference (unit-tested); they have **not** executed
+  on hardware. First 5090 run may surface bugs (Triton fp8 load conversion
+  on sm_120 is the most likely spot).
+- The DSpark enablement in `bench_5090.py` (`speculative_config` with
+  `method: dspark`, draft auto-derived from the checkpoint `mtp_config`)
+  follows vLLM's MTP conventions and the PR's `Inkling2DSparkSpeculatorConfig`
+  but has not been run; exact required keys may differ.
+- `llm.get_metrics()` acceptance-rate reporting is best-effort across vLLM
+  versions.
+- LoRA + FP8 lm_head is rejected (LoRA paths read the raw weight).
+
+## Licenses
+
+- vLLM and this fork's code: Apache-2.0 (SPDX headers kept).
+- Inkling 2 Mini weights: Apache-2.0 per the model card, plus the Thinking
+  Machines
+  [Model Acceptable Use Policy](https://thinkingmachines.ai/model-acceptable-use-policy/).
+- The Reddit sm89 patch is not included anywhere in this branch.

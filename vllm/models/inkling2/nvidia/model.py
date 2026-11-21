@@ -87,6 +87,17 @@ class Inkling2LogitsProcessor(LogitsProcessor):
             UnquantizedEmbeddingMethod,
         )
 
+        # azjhf-dev fork: opt-in FP8 W8A16 head (INKLING2_FP8_DENSE=lm_head).
+        # Only on the plain bf16 path; LoRA (embedding_bias) keeps bf16.
+        fp8_head = getattr(lm_head, "fp8_w8a16", None)
+        if (
+            fp8_head is not None
+            and self.head_dtype == torch.float32
+            and embedding_bias is None
+            and hidden_states.dtype == torch.bfloat16
+        ):
+            return fp8_head(hidden_states, out_dtype=torch.float32)
+
         if (
             self.head_dtype == torch.float32
             and isinstance(
@@ -813,6 +824,11 @@ class Inkling2ForConditionalGeneration(
             loaded |= {f"visual.{n}" for n in self.visual.load_weights(visual_weights)}
         if missing := params.keys() - loaded:
             raise ValueError(f"Missing checkpoint tensors: {sorted(missing)}")
+        # azjhf-dev fork: opt-in FP8 W8A16 conversion of dense weights
+        # (INKLING2_FP8_DENSE); runs once, after every tensor is loaded.
+        from .fp8_dense import apply_fp8_dense
+
+        apply_fp8_dense(self)
         return loaded
 
 
