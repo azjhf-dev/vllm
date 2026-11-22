@@ -1,8 +1,12 @@
 # Inkling 2 Mini on RTX 5090 — FP8 W8A16 + DSpark (azjhf-dev fork)
 
-Branch: `inkling2-mini-sm120-fp8`, based on the head of upstream PR
-[vllm-project/vllm#69028](https://github.com/vllm-project/vllm/pull/69028)
-(`[Model] Add Inkling 2 Mini`, commit `fc1443152`).
+Branch: `inkling2-mini-sm120-fp8`, rebased onto upstream vLLM `main` at
+`443b51e52f`, which includes the merged Inkling 2 Mini support (PR
+[#69028](https://github.com/vllm-project/vllm/pull/69028), merged
+2026-11-22 00:19 SGT as squash commit `ab18334a4f`). The merged version adds
+review fixes over the PR head plus a new sm_120 `qkv_bmm` split-projection
+path (`ops/ll_gemm_sm120.py`); our FP8 path takes precedence when enabled,
+the bf16 `qkv_bmm` path is untouched otherwise.
 
 ## Why this fork exists
 
