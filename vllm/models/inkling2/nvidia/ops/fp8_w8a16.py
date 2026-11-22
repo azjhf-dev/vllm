@@ -228,6 +228,13 @@ class Fp8W8A16Linear:
     def device(self) -> torch.device:
         return self.weight_q.device
 
+    def rows(self, start: int, end: int) -> "Fp8W8A16Linear":
+        """View over a contiguous run of output rows (views, no copies).
+
+        Used for fused projections such as Inkling2's qkvr, where the caller
+        matmuls against row slices of the weight."""
+        return Fp8W8A16Linear(self.weight_q[start:end], self.scale[start:end])
+
     def __call__(
         self, x: torch.Tensor, out_dtype: torch.dtype | None = None
     ) -> torch.Tensor:

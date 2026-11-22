@@ -333,23 +333,32 @@ class Inkling2Attention(nn.Module, AttentionLayerBase):
     ) -> list[torch.Tensor]:
         # ``linear`` on the weight bypasses the layer (and a LoRA wrapper's
         # forward), so the LoRA deltas are added here (no-op without LoRA).
+        # azjhf-dev fork: when INKLING2_FP8_DENSE=attn attached an FP8 copy
+        # (never under LoRA), the same row slices run through it instead.
         weight = self.qkvr.weight
+        fp8 = getattr(self, "qkvr_fp8", None)
         if x_k is x_q and x_v is x_q:
-            projected = linear(x_q, weight)
+            projected = linear(x_q, weight) if fp8 is None else fp8(x_q)
             add_linear_lora(self.qkvr, projected, x_q, range(6))
             return list(projected.split(self.split_sizes, dim=-1)[:6])
         q_side, kv_size = sum(self.split_sizes[:4]), self.split_sizes[4]
         k_end = q_side + kv_size
-        if use_qkv_bmm(x_q, x_k, x_v, weight):
+        if fp8 is not None:
+            # azjhf-dev fork: FP8 W8A16 row slices. Skips qkv_bmm (bf16-only).
+            projected = fp8.rows(0, sum(self.q_side_splits))(x_q)
+            k = fp8.rows(q_side, k_end)(x_k)
+            v = fp8.rows(k_end, k_end + kv_size)(x_v)
+        elif use_qkv_bmm(x_q, x_k, x_v, weight):
             projected = qkv_bmm(x_q, x_k, x_v, weight, q_side, k_end)
             splits = projected.split(self.split_sizes, dim=-1)
             add_linear_lora(self.qkvr, projected, x_q, range(4))
             add_linear_lora(self.qkvr, splits[4], x_k, [4])
             add_linear_lora(self.qkvr, splits[5], x_v, [5])
             return list(splits[:6])
-        projected = linear(x_q, weight[: sum(self.q_side_splits)])
-        k = linear(x_k, weight[q_side:k_end])
-        v = linear(x_v, weight[k_end : k_end + kv_size])
+        else:
+            projected = linear(x_q, weight[: sum(self.q_side_splits)])
+            k = linear(x_k, weight[q_side:k_end])
+            v = linear(x_v, weight[k_end : k_end + kv_size])
         add_linear_lora(self.qkvr, projected, x_q, range(4))
         add_linear_lora(self.qkvr, k, x_k, [4])
         add_linear_lora(self.qkvr, v, x_v, [5])
@@ -403,7 +412,14 @@ class Inkling2Attention(nn.Module, AttentionLayerBase):
             output,
             pass_idx,
         )
-        out = linear(output, self.wo_ud.weight, out)
+        wo_fp8 = getattr(self, "wo_ud_fp8", None)
+        if wo_fp8 is None:
+            out = linear(output, self.wo_ud.weight, out)
+        else:
+            # azjhf-dev fork: FP8 W8A16 output projection. One extra device
+            # copy into `out` versus the fused torch.mm path; acceptable for
+            # now (measured optimization is a later iteration).
+            out.copy_(wo_fp8(output))
         add_linear_lora(self.wo_ud, out, output)
         return out
 

@@ -32,10 +32,10 @@ already supports SM120/SM121 natively (capability-family 120 gates), so the
 | Piece | Status | Notes |
 |---|---|---|
 | Base: PR #69028 (model + DSpark drafter, NVFP4 experts, FP8 KV) | inherited, upstream-tested on GB200 | sm_120 covered by the family-120 gates |
-| `nvidia/ops/fp8_w8a16.py`: FP8 W8A16 Triton GEMV (M<=16) + tiled GEMM, per-row scales, fp32 accumulation | added; CPU-reference tested in sandbox; **Triton kernels compile-tested only, not run on a GPU** | no FP8 tensor cores needed; bf16 math |
-| `nvidia/fp8_dense.py` + `INKLING2_FP8_DENSE` env gating, wired into `load_weights` and `Inkling2LogitsProcessor._apply_head` | added, `lm_head` group implemented | bf16 lm_head weight is kept: the DSpark drafter aliases it and asserts bf16 |
-| FP8 for attention projections (qkvr / wo_ud) | **planned, not implemented** | needs care around `add_linear_lora` reading `.weight` |
-| FP8 input embeddings | **planned, not implemented** | quality risk: per-row FP8 error feeds the residual stream directly; measure first |
+| `nvidia/ops/fp8_w8a16.py`: FP8 W8A16 Triton GEMV (M<=16) + tiled GEMM, per-row scales, fp32 accumulation | added; CPU-reference tested in sandbox; **Triton kernels compile-tested only, not run on a GPU** | no FP8 tensor cores needed; bf16 math; `rows()` views for fused projections |
+| `nvidia/fp8_dense.py` + `INKLING2_FP8_DENSE` env gating, wired into `load_weights` and `Inkling2LogitsProcessor._apply_head` | added; groups `lm_head`, `attn`, `embed` implemented | bf16 lm_head weight is kept: the DSpark drafter aliases it and asserts bf16 |
+| FP8 for attention projections (qkvr / wo_ud) | **implemented (iteration 2)** | FP8 copies attached as `attn.qkvr_fp8` / `attn.wo_ud_fp8`; `_project` and the wo_ud call site use them when present (row slices via `rows()`); bf16 weights kept, LoRA skips conversion entirely; wo_ud pays one extra device copy into `out` for now |
+| FP8 input embeddings | **implemented (iteration 2, EXPERIMENTAL)** | `Fp8Embedding` swap at TP=1 only; memory play (0.93 GB -> 0.46 GB); quality impact unmeasured, off unless requested |
 | `tests/models/inkling2/test_fp8_w8a16.py` | added | CPU tests run in CI-style env; CUDA tests skip without a GPU |
 | `benchmarks/inkling2/bench_5090.py` | added, not yet run on hardware | configurable: fp8 on/off, DSpark on/off, context, batch, lens |
 
@@ -45,15 +45,15 @@ already supports SM120/SM121 natively (capability-family 120 gates), so the
 # stock PR behaviour (bf16 head, DSpark off)
 python benchmarks/inkling2/bench_5090.py --model thinkingmachines/Inkling-2-Mini
 
-# our FP8 W8A16 lm_head + DSpark, 35k context like the Reddit setup
+# our FP8 W8A16 lm_head + attention + DSpark, 35k context like the Reddit setup
 python benchmarks/inkling2/bench_5090.py \
     --model thinkingmachines/Inkling-2-Mini \
-    --fp8-dense lm_head --dspark --num-speculative-tokens 7 \
+    --fp8-dense lm_head,attn --dspark --num-speculative-tokens 7 \
     --max-model-len 35840 --input-len 512 --output-len 256 --num-prompts 8
 ```
 
-`INKLING2_FP8_DENSE` is a comma list; only `lm_head` is implemented.
-Unknown values raise; planned-but-unimplemented groups warn and skip.
+`INKLING2_FP8_DENSE` is a comma list of `lm_head`, `attn`, `embed`
+(`embed` is experimental). Unknown values raise; nothing is on by default.
 
 ## Expected effect (reasoning, not measurement)
 

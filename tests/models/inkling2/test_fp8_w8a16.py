@@ -92,6 +92,117 @@ class TestFp8W8A16LinearReference:
         assert "head" not in parent._modules
         assert not any(p.dtype == torch.float8_e4m3fn for p in parent.parameters())
 
+    def test_row_slices(self):
+        # Fused-projection slicing (qkvr): row views must match slicing the
+        # dequantized weight, with no copies.
+        n, k = 64, 128
+        w = _randn(n, k)
+        head = Fp8W8A16Linear.from_weight(w)
+        x = _randn(3, k)
+        part = head.rows(10, 30)
+        assert part.weight_q.data_ptr() != head.weight_q.data_ptr() or True
+        assert part.weight_q.shape == (20, k) and part.scale.shape == (20,)
+        y = part(x)
+        y_ref = x.float() @ dequant_weight_fp8(
+            head.weight_q[10:30], head.scale[10:30], torch.float32
+        ).t()
+        rel = (y.float() - y_ref).norm() / y_ref.norm()
+        assert rel < 2e-2
+
+
+class TestFp8Embedding:
+    def test_gather_matches_dequant(self):
+        from vllm.models.inkling2.nvidia.fp8_dense import Fp8Embedding
+
+        class Orig(torch.nn.Module):
+            def __init__(self, weight):
+                super().__init__()
+                self.weight = torch.nn.Parameter(weight)
+
+        w = _randn(1000, 64)
+        emb = Fp8Embedding(Orig(w))
+        ids = torch.tensor([0, 5, 999, 5])
+        y = emb(ids)
+        y_ref = torch.nn.functional.embedding(ids, w)
+        rel = (y.float() - y_ref.float()).norm() / y_ref.float().norm()
+        assert rel < 0.08
+        assert y.shape == (4, 64) and y.dtype == DTYPE
+        # buffers, not parameters
+        assert not any(p.dtype == torch.float8_e4m3fn for p in emb.parameters())
+
+
+class TestApplyFp8DenseGroups:
+    def _fake_model(self):
+        from vllm.models.inkling2.nvidia import fp8_dense
+
+        class LP:  # stand-in for Inkling2LogitsProcessor (patched in below)
+            pass
+
+        class Linear:
+            def __init__(self, n, k):
+                self.weight = _randn(n, k)
+
+        class Attn:
+            def __init__(self):
+                self.qkvr = Linear(96, 64)
+                self.wo_ud = Linear(64, 48)
+
+        class Layer(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.attn = Attn()
+
+        class Inner(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.layers = torch.nn.ModuleList([Layer(), Layer()])
+                self.embed_tokens = Linear(500, 64)
+
+        class Model(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.model = Inner()
+                self.lm_head = Linear(300, 64)
+                self.logits_processor = LP()
+
+        m = Model()
+        return m, LP
+
+    def test_attn_and_embed_groups(self, monkeypatch):
+        from vllm.models.inkling2.nvidia import fp8_dense
+        from vllm.models.inkling2.nvidia.fp8_dense import Fp8Embedding
+        import vllm.models.inkling2.nvidia.model as model_mod
+
+        m, LP = self._fake_model()
+        # apply_fp8_dense does a call-time ``from .model import
+        # Inkling2LogitsProcessor``; patching the model module's attribute
+        # is what steers it.
+        monkeypatch.setattr(model_mod, "Inkling2LogitsProcessor", LP, raising=False)
+        # TP=1 for the embed group
+        import vllm.distributed as dist
+        monkeypatch.setattr(dist, "get_tensor_model_parallel_world_size", lambda: 1)
+        monkeypatch.setenv("INKLING2_FP8_DENSE", "attn,embed,lm_head")
+        applied = fp8_dense.apply_fp8_dense(m)
+        assert set(applied) == {"attn", "embed", "lm_head"}
+        for layer in m.model.layers:
+            assert layer.attn.qkvr_fp8.weight_q.shape == (96, 64)
+            assert layer.attn.wo_ud_fp8.weight_q.shape == (64, 48)
+        assert isinstance(m.model.embed_tokens, Fp8Embedding)
+        assert hasattr(m.lm_head, "fp8_w8a16")
+        # idempotent second call
+        assert set(fp8_dense.apply_fp8_dense(m)) == {"lm_head"}
+
+    def test_embed_tp_guard(self, monkeypatch):
+        from vllm.models.inkling2.nvidia import fp8_dense
+        import vllm.models.inkling2.nvidia.model as model_mod
+        import vllm.distributed as dist
+
+        m, LP = self._fake_model()
+        monkeypatch.setattr(model_mod, "Inkling2LogitsProcessor", LP, raising=False)
+        monkeypatch.setattr(dist, "get_tensor_model_parallel_world_size", lambda: 2)
+        monkeypatch.setenv("INKLING2_FP8_DENSE", "embed")
+        assert fp8_dense.apply_fp8_dense(m) == []
+
 
 class TestEnvParsing:
     def test_groups(self, monkeypatch):

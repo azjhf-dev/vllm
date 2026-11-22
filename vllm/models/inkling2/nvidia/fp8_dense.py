@@ -28,7 +28,7 @@ import torch
 
 from vllm.logger import init_logger
 
-from .ops.fp8_w8a16 import Fp8W8A16Linear
+from .ops.fp8_w8a16 import Fp8W8A16Linear, quant_weight_fp8
 
 if TYPE_CHECKING:
     from .model import Inkling2ForConditionalGeneration
@@ -36,8 +36,8 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 ENV_VAR = "INKLING2_FP8_DENSE"
-IMPLEMENTED_GROUPS = ("lm_head",)
-PLANNED_GROUPS = ("attn", "embed")
+IMPLEMENTED_GROUPS = ("lm_head", "attn", "embed")
+PLANNED_GROUPS: tuple[str, ...] = ()
 VALID_GROUPS = IMPLEMENTED_GROUPS + PLANNED_GROUPS
 
 
@@ -70,18 +70,35 @@ def apply_fp8_dense(model: "Inkling2ForConditionalGeneration") -> list[str]:
             planned,
         )
 
-    if "lm_head" not in groups:
-        return applied
-
     # Local import to avoid a cycle: model.py imports this module lazily.
     from .model import Inkling2LogitsProcessor
 
     if not isinstance(model.logits_processor, Inkling2LogitsProcessor):
-        logger.warning(
-            "%s=lm_head skipped: LoRA is enabled and the LoRA logits path "
-            "reads the raw bf16 weight.",
-            ENV_VAR,
-        )
+        if groups:
+            logger.warning(
+                "%s=%s skipped: LoRA is enabled and the LoRA paths read the "
+                "raw bf16 weights.",
+                ENV_VAR,
+                ",".join(sorted(groups)),
+            )
+        return applied
+
+    if "attn" in groups:
+        n = _convert_attn(model)
+        if n:
+            applied.append("attn")
+            logger.info(
+                "%s: qkvr/wo_ud of %d attention layers quantized to FP8 W8A16 "
+                "(bf16 weights kept; add_linear_lora is a no-op without LoRA).",
+                ENV_VAR,
+                n,
+            )
+
+    if "embed" in groups:
+        if _convert_embed(model):
+            applied.append("embed")
+
+    if "lm_head" not in groups:
         return applied
 
     weight = model.lm_head.weight
@@ -103,3 +120,76 @@ def apply_fp8_dense(model: "Inkling2ForConditionalGeneration") -> list[str]:
         model.lm_head.fp8_w8a16.weight_q.numel(),
     )
     return applied
+
+
+def _convert_attn(model: "Inkling2ForConditionalGeneration") -> int:
+    """Attach FP8 copies of every attention layer's qkvr / wo_ud weights.
+
+    The bf16 weights are kept (small: ~54 MB per layer pair on Inkling 2
+    Mini); ``Inkling2Attention._project`` and the wo_ud call site read the
+    FP8 copy when present. Returns the number of layers converted.
+    """
+    converted = 0
+    for layer in model.model.layers:
+        attn = getattr(layer, "attn", None)
+        if attn is None or getattr(attn, "qkvr_fp8", None) is not None:
+            continue
+        attn.qkvr_fp8 = Fp8W8A16Linear.from_weight(attn.qkvr.weight)
+        attn.wo_ud_fp8 = Fp8W8A16Linear.from_weight(attn.wo_ud.weight)
+        converted += 1
+    return converted
+
+
+class Fp8Embedding(torch.nn.Module):
+    """FP8 W8A16 drop-in for VocabParallelEmbedding at TP=1 (EXPERIMENTAL).
+
+    Per-row FP8 gather + dequant. The win is memory (0.93 GB -> 0.46 GB for
+    Inkling 2 Mini's 201024 x 2304 table), not speed: decode gathers one row
+    per token. Quality impact is unmeasured - per-row FP8 error feeds the
+    residual stream directly. Not used by default.
+    """
+
+    def __init__(self, orig: torch.nn.Module) -> None:
+        super().__init__()
+        weight_q, scale = quant_weight_fp8(orig.weight)
+        # Buffers so .to()/device moves keep working; not nn.Parameters, so
+        # checkpoint-loading traversals never see them (conversion runs
+        # after load_weights).
+        self.register_buffer("weight_q", weight_q)
+        self.register_buffer("scale", scale)
+
+    def forward(self, input_: torch.Tensor) -> torch.Tensor:
+        w = self.weight_q[input_]
+        s = self.scale[input_]
+        return (w.to(torch.bfloat16).to(torch.float32) * s[..., None]).to(
+            torch.bfloat16
+        )
+
+
+def _convert_embed(model: "Inkling2ForConditionalGeneration") -> bool:
+    from vllm.distributed import get_tensor_model_parallel_world_size
+
+    if get_tensor_model_parallel_world_size() != 1:
+        logger.warning(
+            "%s=embed skipped: only TP=1 is supported (vocab shards need "
+            "masked gathers).",
+            ENV_VAR,
+        )
+        return False
+    embed = model.model.embed_tokens
+    if isinstance(embed, Fp8Embedding):
+        return False
+    if embed.weight.dtype != torch.bfloat16:
+        logger.warning(
+            "%s=embed skipped: expected a bf16 embedding, got %s.",
+            ENV_VAR,
+            embed.weight.dtype,
+        )
+        return False
+    model.model.embed_tokens = Fp8Embedding(embed)
+    logger.info(
+        "%s: input embeddings quantized to FP8 W8A16 (EXPERIMENTAL, memory "
+        "play only; quality impact unmeasured).",
+        ENV_VAR,
+    )
+    return True
