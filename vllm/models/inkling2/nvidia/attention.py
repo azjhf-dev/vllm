@@ -416,10 +416,9 @@ class Inkling2Attention(nn.Module, AttentionLayerBase):
         if wo_fp8 is None:
             out = linear(output, self.wo_ud.weight, out)
         else:
-            # azjhf-dev fork: FP8 W8A16 output projection. One extra device
-            # copy into `out` versus the fused torch.mm path; acceptable for
-            # now (measured optimization is a later iteration).
-            out.copy_(wo_fp8(output))
+            # azjhf-dev fork: FP8 W8A16 output projection, written straight
+            # into the caller's `out` (no extra device copy).
+            wo_fp8(output, out_dtype=out.dtype, out=out)
         add_linear_lora(self.wo_ud, out, output)
         return out
 

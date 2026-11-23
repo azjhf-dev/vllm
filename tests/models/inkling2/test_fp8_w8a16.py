@@ -79,6 +79,18 @@ class TestFp8W8A16LinearReference:
         y_nb = fp8_w8a16_linear(x, q, s, out_dtype=torch.float32)
         assert torch.allclose(y, y_nb + b.float(), atol=1e-3)
 
+    def test_out_param(self):
+        # wo_ud path: kernels write straight into the caller's buffer.
+        m, n, k = 5, 64, 128
+        x = _randn(m, k)
+        w = _randn(n, k)
+        q, s = quant_weight_fp8(w)
+        out = torch.zeros(m, n, dtype=DTYPE)
+        ret = fp8_w8a16_linear(x, q, s, out=out)
+        assert ret.data_ptr() == out.data_ptr()
+        y_ref = fp8_w8a16_linear(x, q, s)
+        assert torch.equal(out, y_ref)
+
     def test_module_wrapper(self):
         n, k = 32, 64
         w = _randn(n, k)

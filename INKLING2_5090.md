@@ -42,6 +42,25 @@ already supports SM120/SM121 natively (capability-family 120 gates), so the
 | FP8 input embeddings | **implemented (iteration 2, EXPERIMENTAL)** | `Fp8Embedding` swap at TP=1 only; memory play (0.93 GB -> 0.46 GB); quality impact unmeasured, off unless requested |
 | `tests/models/inkling2/test_fp8_w8a16.py` | added | CPU tests run in CI-style env; CUDA tests skip without a GPU |
 | `benchmarks/inkling2/bench_5090.py` | added, not yet run on hardware | configurable: fp8 on/off, DSpark on/off, context, batch, lens |
+| `benchmarks/inkling2/fp8_weight_probe.py` | added; **run on the real checkpoint weights** | range-downloads one tensor from the HF safetensors file and measures FP8 error; `--from-file` for local dumps |
+
+## Measured FP8 error on the real weights (CPU, 2026-11-23)
+
+`fp8_weight_probe.py` on `model.llm.embed.weight` and
+`model.llm.unembed.weight` (201024 x 2304 bf16 each), per-row e4m3 absmax:
+
+| Tensor | global rel. Frobenius err | row err median / p99 / max | dot-product sim |
+|---|---|---|---|
+| embed | 2.64% | 2.64% / 2.76% / 2.88% | 2.64% |
+| unembed (lm_head) | 2.64% | 2.64% / 2.76% / 2.94% | 2.63% |
+
+Tight distribution, ~2^-5.2, as expected for e4m3 with per-row scales.
+What this means: lm_head FP8 perturbs every logit by ~2.6% relative, which
+can flip greedy argmax when the top tokens are close; embed FP8 injects
+~2.6% relative error per token directly into the residual stream (kept
+EXPERIMENTAL for that reason). Whether either lands near the Reddit OP's
+claimed ~0.4% perplexity loss can only be answered by running the model -
+the probe bounds the weight-space error, not the task metric.
 
 ## Usage (on a 5090)
 

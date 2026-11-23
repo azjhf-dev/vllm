@@ -154,12 +154,14 @@ def fp8_w8a16_linear(
     scale: torch.Tensor,
     bias: torch.Tensor | None = None,
     out_dtype: torch.dtype | None = None,
+    out: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """``x @ dequant(weight_q, scale).T`` with fp32 accumulation.
 
     x: [..., K] bf16 (or fp16); weight_q: [N, K] float8_e4m3fn; scale: [N]
     fp32. Uses the Triton kernels on CUDA and an exact same-order torch
-    reference elsewhere. Returns ``out_dtype`` (default: x.dtype).
+    reference elsewhere. Returns ``out_dtype`` (default: x.dtype). When
+    ``out`` ([M, N]) is given, the kernels write into it directly.
     """
     assert weight_q.ndim == 2 and weight_q.dtype == torch.float8_e4m3fn
     n, k = weight_q.shape
@@ -169,8 +171,15 @@ def fp8_w8a16_linear(
     m = x2.shape[0]
     out_dtype = out_dtype or x.dtype
 
+    if out is not None:
+        assert out.shape == (m, n) and out.is_cuda == x2.is_cuda
+        if out_dtype is not None:
+            assert out.dtype == out_dtype
+
     if x2.is_cuda:
-        y = torch.empty((m, n), device=x2.device, dtype=out_dtype)
+        y = out if out is not None else torch.empty(
+            (m, n), device=x2.device, dtype=out_dtype
+        )
         if m <= GEMV_MAX_M:
             grid = (triton.cdiv(n, _GEMV_BN),)
             _fp8_w8a16_gemv_kernel[grid](
@@ -187,7 +196,7 @@ def fp8_w8a16_linear(
                 HAS_BIAS=bias is not None,
                 BM=_GEMM_BM, BN=_GEMM_BN, BK=_GEMM_BK,
             )
-        return y.view(*lead, n)
+        return y.view(*lead, n) if out is None else out
 
     # Reference path: same operation order as the kernels (bf16 product terms,
     # fp32 accumulation, per-row scale applied afterwards).
@@ -195,7 +204,11 @@ def fp8_w8a16_linear(
     y = y * scale.to(torch.float32)
     if bias is not None:
         y = y + bias.to(torch.float32)
-    return y.to(out_dtype).view(*lead, n)
+    y = y.to(out_dtype).view(*lead, n)
+    if out is not None:
+        out.copy_(y)
+        return out
+    return y
 
 
 class Fp8W8A16Linear:
@@ -236,6 +249,11 @@ class Fp8W8A16Linear:
         return Fp8W8A16Linear(self.weight_q[start:end], self.scale[start:end])
 
     def __call__(
-        self, x: torch.Tensor, out_dtype: torch.dtype | None = None
+        self,
+        x: torch.Tensor,
+        out_dtype: torch.dtype | None = None,
+        out: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        return fp8_w8a16_linear(x, self.weight_q, self.scale, self.bias, out_dtype)
+        return fp8_w8a16_linear(
+            x, self.weight_q, self.scale, self.bias, out_dtype, out=out
+        )
