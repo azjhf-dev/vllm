@@ -78,6 +78,26 @@ python benchmarks/inkling2/bench_5090.py \
 `INKLING2_FP8_DENSE` is a comma list of `lm_head`, `attn`, `embed`
 (`embed` is experimental). Unknown values raise; nothing is on by default.
 
+## Quality gate (2026-11-24)
+
+`benchmarks/inkling2/quality_gate.py` measures the perplexity cost of the
+FP8 path so the Reddit "+0.4% perplexity" claim can be checked on your own
+hardware. Teacher-forced perplexity over WikiText-2 (configurable) via vLLM
+`prompt_logprobs`, same model code and the same `INKLING2_FP8_DENSE` switch
+as generation:
+
+```bash
+python benchmarks/inkling2/quality_gate.py --json-out ppl_bf16.json
+python benchmarks/inkling2/quality_gate.py --fp8-dense lm_head --json-out ppl_fp8.json
+python benchmarks/inkling2/quality_gate.py --compare ppl_bf16.json ppl_fp8.json
+```
+
+Window placement is deterministic (fixed seed), so two runs with identical
+flags score identical text and the delta is apples-to-apples. CPU-tested:
+window construction and the compare logic (6 unit tests). The evaluation
+loop itself needs a GPU and has not run yet; the OP's 0.4% stays
+unverified until someone runs it.
+
 ## Expected effect (reasoning, not measurement)
 
 Decode is bandwidth-bound. Per generated token the dense reads are dominated
