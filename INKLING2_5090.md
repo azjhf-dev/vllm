@@ -1,7 +1,10 @@
 # Inkling 2 Mini on RTX 5090 — FP8 W8A16 + DSpark (azjhf-dev fork)
 
 Branch: `inkling2-mini-sm120-fp8`, rebased onto upstream vLLM `main` at
-`443b51e52f`, which includes the merged Inkling 2 Mini support (PR
+`3146a9df4` (upstream `main` as of 2026-11-24; base pinned here — rebases
+are paused because our push token lacks the `workflow` scope GitHub
+requires when upstream commits touch `.github/workflows/`). That base
+includes the merged Inkling 2 Mini support (PR
 [#69028](https://github.com/vllm-project/vllm/pull/69028), merged
 2026-11-22 00:19 SGT as squash commit `ab18334a4f`). The merged version adds
 review fixes over the PR head plus a new sm_120 `qkv_bmm` split-projection
