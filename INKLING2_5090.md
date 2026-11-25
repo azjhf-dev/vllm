@@ -98,6 +98,23 @@ window construction and the compare logic (6 unit tests). The evaluation
 loop itself needs a GPU and has not run yet; the OP's 0.4% stays
 unverified until someone runs it.
 
+## Triton tile tuning (2026-11-25, needs one 5090 run)
+
+The FP8 kernels ship conservative fixed tile sizes (GEMV BN=32 BK=256,
+GEMM BM=64 BN=64 BK=64) shared across SM90/SM100/SM120. They are
+untested on hardware. `benchmarks/inkling2/tune_fp8_tiles.py` sweeps
+candidate tiles for the real Inkling 2 Mini shapes on your GPU and prints
+the winners as env settings. Override without recompiling:
+
+```bash
+INKLING2_FP8_GEMV_BN=64 INKLING2_FP8_GEMV_BK=128 \
+    python benchmarks/inkling2/bench_5090.py --fp8-dense lm_head ...
+```
+
+Env values must be powers of two >= 16 (tl.dot minimum); invalid values
+raise at import. Defaults stay until a sweep on the 5090 says otherwise;
+paste the table into the fork thread and the sm_120 defaults get updated.
+
 ## Expected effect (reasoning, not measurement)
 
 Decode is bandwidth-bound. Per generated token the dense reads are dominated

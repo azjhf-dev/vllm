@@ -6,9 +6,24 @@ Window construction and result comparison run on CPU with no weights, no
 GPU and no HF downloads. The vLLM evaluation path is exercised on the 5090.
 """
 
+import importlib.util
 import json
+import sys
 
-from benchmarks.inkling2.quality_gate import compare, make_windows
+
+def _load_quality_gate():
+    # benchmarks/ is a script dir without __init__.py upstream; load by path.
+    spec = importlib.util.spec_from_file_location(
+        "quality_gate", "benchmarks/inkling2/quality_gate.py")
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = mod  # dataclass decorator resolves __module__
+    spec.loader.exec_module(mod)
+    return mod
+
+
+_qg = _load_quality_gate()
+compare = _qg.compare
+make_windows = _qg.make_windows
 
 
 class TestMakeWindows:

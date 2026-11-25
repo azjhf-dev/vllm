@@ -17,6 +17,8 @@ unverified until measured on hardware with ``benchmarks/inkling2/bench_5090.py``
 
 from __future__ import annotations
 
+import os
+
 import torch
 
 from vllm.triton_utils import tl, triton
@@ -27,10 +29,36 @@ FP8_MAX = 448.0
 # Decode regime: at most this many rows use the GEMV-style kernel, mirroring
 # gemv.py's sm12x path (tl.dot needs M >= 16, so rows are zero-padded to MP).
 GEMV_MAX_M = 16
-_GEMV_BN, _GEMV_BK = 32, 256
+
+
+def _tile_env(name: str, default: int) -> int:
+    """Tile-size override for sm_120 tuning (INKLING2_FP8_* env vars).
+
+    Values must be powers of two >= 16 (tl.dot minimum tile edge). The
+    defaults below are conservative and shared across SM90/SM100/SM120; run
+    ``benchmarks/inkling2/tune_fp8_tiles.py`` on the target GPU and set the
+    printed env values if they win.
+    """
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        v = int(raw)
+    except ValueError:
+        raise ValueError(f"{name} must be an integer, got {raw!r}") from None
+    if v < 16 or v & (v - 1):
+        raise ValueError(
+            f"{name} must be a power of two >= 16 (tl.dot minimum), got {v}")
+    return v
+
+
+_GEMV_BN = _tile_env("INKLING2_FP8_GEMV_BN", 32)
+_GEMV_BK = _tile_env("INKLING2_FP8_GEMV_BK", 256)
 
 # Prefill / verify regime: plain tiled GEMM.
-_GEMM_BM, _GEMM_BN, _GEMM_BK = 64, 64, 64
+_GEMM_BM = _tile_env("INKLING2_FP8_GEMM_BM", 64)
+_GEMM_BN = _tile_env("INKLING2_FP8_GEMM_BN", 64)
+_GEMM_BK = _tile_env("INKLING2_FP8_GEMM_BK", 64)
 
 
 def quant_weight_fp8(weight: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
