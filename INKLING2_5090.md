@@ -142,6 +142,24 @@ lm_head FP8 path alone, plus the DSpark multiplier. Measure, don't trust.
   versions.
 - LoRA + FP8 lm_head is rejected (LoRA paths read the raw weight).
 
+## Upstream watch (2026-11-26)
+
+Tracked while the base is pinned at `3146a9df4` (rebase paused, see top):
+
+- `9b1d98140` "FP8 DSpark draft through the speculative config" (ROCm Muse
+  Spark): upstream now supports quantizing a *drafter's* lm_head
+  (`draft_lm_head_quantization`). It does not apply to Inkling 2 Mini: our
+  DSpark drafter aliases the target's lm_head and asserts it stays bf16
+  (`nvidia/dspark.py:490`), so the option stays unsupported for us even
+  after the rebase. Note the flip side for our own FP8 lm_head: when
+  `INKLING2_FP8_DENSE=lm_head` is on, the target scores with the FP8 head
+  while the drafter proposes with the aliased bf16 head. Correctness is
+  unaffected (the target's logits decide acceptance), but acceptance length
+  can shift versus pure bf16. Measure with the acceptance metrics in
+  `bench_5090.py --dspark`, fp8 on vs off.
+- `8b014b2cb` "Granite Docling": MiniMax-M3-specific dspark draft loading,
+  irrelevant to Inkling.
+
 ## Licenses
 
 - vLLM and this fork's code: Apache-2.0 (SPDX headers kept).
