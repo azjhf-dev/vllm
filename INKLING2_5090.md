@@ -81,6 +81,30 @@ python benchmarks/inkling2/bench_5090.py \
 `INKLING2_FP8_DENSE` is a comma list of `lm_head`, `attn`, `embed`
 (`embed` is experimental). Unknown values raise; nothing is on by default.
 
+## First 5090 run: ordered checklist
+
+Everything above is untested on hardware. On the first cloud 5090, run in
+this order and paste each output into the fork thread:
+
+1. **Smoke, stock behaviour** (no FP8): `bench_5090.py` with defaults.
+   Confirms the merged upstream model runs on the 5090 before our delta
+   enters. If this fails, the bug is upstream, not us.
+2. **FP8 smoke**: same command plus `--fp8-dense lm_head`. First real
+   execution of the Triton kernels; watch for fp8 load-conversion failures
+   on sm_120 (most likely breakage point).
+3. **Throughput**: `--fp8-dense lm_head --dspark` vs step 1. Report tok/s
+   and the printed acceptance metrics, fp8 on vs off (acceptance length can
+   shift: the drafter proposes with the aliased bf16 head while the target
+   scores with the FP8 head - see Upstream watch).
+4. **Tile tuning**: `python benchmarks/inkling2/tune_fp8_tiles.py`. Paste
+   the table; if non-default tiles win, set the printed `INKLING2_FP8_*`
+   env values and re-run step 3.
+5. **Quality**: `quality_gate.py` baseline vs `--fp8-dense lm_head`, then
+   `--compare`. This is the check of the Reddit "+0.4% perplexity" claim -
+   record what we get, the OP's number stays unverified either way.
+6. **Optional**: add `--fp8-dense attn` and finally `embed` (experimental;
+   embed error feeds the residual stream directly, see the probe section).
+
 ## Quality gate (2026-11-24)
 
 `benchmarks/inkling2/quality_gate.py` measures the perplexity cost of the
