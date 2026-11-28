@@ -168,7 +168,21 @@ lm_head FP8 path alone, plus the DSpark multiplier. Measure, don't trust.
 
 ## Upstream watch (2026-11-26)
 
-Tracked while the base is pinned at `3146a9df4` (rebase paused, see top):
+Tracked while the base is pinned at `3146a9df4` (rebase paused, see top).
+
+**Backported 2026-11-28** (cherry-picked with `-x`, zero overlap with our
+delta; original authorship kept):
+
+- `da11057ed` (#70246) conv-cache correctness in short_conv prefill tiles
+  ending in padding. Without it a 5090 run can produce wrong outputs.
+- `8c102bebd` (#69165) Inkling 2 runs on Ampere/Ada (SM80/SM86/SM89) -
+  upstream now officially supports the Reddit OP's 4090.
+- `0ee12948b` (#69452) stops Triton %16 recompiles in prefill attention.
+- `ae5ded6f5` (#69666) public Gluon reinterpret API.
+
+These four are backports, not a rebase: the merge-base stays `3146a9df4`,
+no `.github/workflows` content enters the branch, and the eventual rebase
+will skip them as already-applied.
 
 - `9b1d98140` "FP8 DSpark draft through the speculative config" (ROCm Muse
   Spark): upstream now supports quantizing a *drafter's* lm_head
